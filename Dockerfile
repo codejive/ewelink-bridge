@@ -13,7 +13,7 @@ ENV NODE_ENV=production
 WORKDIR /app
 
 COPY --from=deps /app/node_modules ./node_modules
-COPY bridge.js ./
+COPY bridge.js config.js mqtt-output.js publications.js ./
 
 RUN addgroup -S app && adduser -S -G app app
 USER app

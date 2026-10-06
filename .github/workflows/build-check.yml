@@ -32,6 +32,9 @@ jobs:
       - name: Validate Node.js entrypoint syntax
         run: node --check bridge.js
 
+      - name: Test configuration, buffering, and broker isolation
+        run: npm test
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 

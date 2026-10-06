@@ -5,7 +5,8 @@
   "main": "bridge.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node bridge.js"
+    "start": "node bridge.js",
+    "test": "node --test"
   },
   "engines": {
     "node": ">=20"
@@ -13,5 +14,8 @@
   "dependencies": {
     "ewelink-api-next": "^1.0.4",
     "mqtt": "^5.14.1"
+  },
+  "devDependencies": {
+    "aedes": "^0.51.3"
   }
 }

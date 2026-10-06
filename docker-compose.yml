@@ -4,5 +4,6 @@ services:
     container_name: ewelink-mqtt-bridge
     restart: unless-stopped
     env_file:
+      # Supports both single-broker and MQTT_OUTPUTS named configuration.
       - .env
     network_mode: host

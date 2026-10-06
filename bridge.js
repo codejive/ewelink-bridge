@@ -1,117 +1,20 @@
 'use strict';
 
 const Ewelink = require('ewelink-api-next').default;
-const mqtt = require('mqtt');
+const { loadConfig } = require('./config');
+const { MqttOutput } = require('./mqtt-output');
+const { devicePublications } = require('./publications');
 
-function getEnv(name, fallback) {
-  const value = process.env[name];
-  return value === undefined || value === '' ? fallback : value;
-}
-
-function getBooleanEnv(name, fallback) {
-  const value = getEnv(name, String(fallback));
-  return ['1', 'true', 'yes', 'on'].includes(String(value).toLowerCase());
-}
-
-function sanitizeTopicLevel(value) {
-  return String(value).replace(/[+#/]/g, '_');
-}
-
-function toPayload(value) {
-  if (value === null || value === undefined) {
-    return '';
-  }
-  if (typeof value === 'object') {
-    return JSON.stringify(value);
-  }
-  return String(value);
-}
-
-const config = {
-  ewelinkAccount: getEnv('EWELINK_ACCOUNT', getEnv('EWELINK_EMAIL')),
-  ewelinkPassword: getEnv('EWELINK_PASSWORD'),
-  ewelinkRegion: getEnv('EWELINK_REGION', 'us'),
-  ewelinkAreaCode: getEnv('EWELINK_AREA_CODE', '+1'),
-  ewelinkAppId: getEnv('EWELINK_APP_ID'),
-  ewelinkAppSecret: getEnv('EWELINK_APP_SECRET'),
-  mqttUrl: getEnv('MQTT_URL', 'mqtt://127.0.0.1:1883'),
-  mqttUser: getEnv('MQTT_USER'),
-  mqttPass: getEnv('MQTT_PASS'),
-  topicPrefix: getEnv('TOPIC_PREFIX', 'ewelink'),
-  publishRawState: getBooleanEnv('PUBLISH_RAW_STATE', true),
-  verbose: getBooleanEnv('VERBOSE', false),
-  mqttRetain: getBooleanEnv('MQTT_RETAIN', true),
-  mqttQos: Number(getEnv('MQTT_QOS', '1')),
-  exitOnWsClose: getBooleanEnv('EXIT_ON_WEBSOCKET_CLOSE', true)
-};
-
-if (!config.ewelinkAccount || !config.ewelinkPassword) {
-  console.error('EWELINK_ACCOUNT and EWELINK_PASSWORD are required.');
-  process.exit(1);
-}
-
-if (!config.ewelinkAppId || !config.ewelinkAppSecret) {
-  console.error('EWELINK_APP_ID and EWELINK_APP_SECRET are required.');
-  process.exit(1);
-}
-
-if (![0, 1, 2].includes(config.mqttQos)) {
-  console.error('MQTT_QOS must be 0, 1, or 2.');
-  process.exit(1);
-}
+let config;
+try { config = loadConfig(); }
+catch (err) { console.error(err.message); process.exit(1); }
 
 let websocket;
 let shuttingDown = false;
-let exitCode = 0;
+const outputs = config.outputs.map(output => new MqttOutput(output));
+outputs.forEach(output => output.start());
 
-const bridgeStatusTopic = `${config.topicPrefix}/bridge/status`;
-
-const mqttClient = mqtt.connect(config.mqttUrl, {
-  username: config.mqttUser,
-  password: config.mqttPass,
-  reconnectPeriod: 3000,
-  will: {
-    topic: bridgeStatusTopic,
-    payload: 'offline',
-    qos: 1,
-    retain: true
-  }
-});
-
-mqttClient.on('connect', () => {
-  console.log(`Connected to MQTT broker: ${config.mqttUrl}`);
-  mqttClient.publish(bridgeStatusTopic, 'online', { qos: 1, retain: true }, (err) => {
-    if (err) {
-      console.error('Failed to publish bridge online status:', err.message || err);
-    }
-  });
-});
-
-mqttClient.on('reconnect', () => {
-  console.log('Reconnecting to MQTT broker...');
-});
-
-mqttClient.on('error', (err) => {
-  console.error('MQTT error:', err.message || err);
-});
-
-function publishMqtt(topic, payload) {
-  return new Promise((resolve) => {
-    mqttClient.publish(
-      topic,
-      payload,
-      { qos: config.mqttQos, retain: config.mqttRetain },
-      (err) => {
-        if (err) {
-          console.error(`Publish failed: ${topic}`, err.message || err);
-        }
-        resolve();
-      }
-    );
-  });
-}
-
-function getWebsocketRawMessage(message) {
+function getWebsocketMessageText(message) {
   if (!message || typeof message.data === 'undefined' || message.data === null) {
     return null;
   }
@@ -119,14 +22,14 @@ function getWebsocketRawMessage(message) {
   return Buffer.isBuffer(message.data) ? message.data.toString('utf8') : String(message.data);
 }
 
-function parseWebsocketPayload(raw) {
-  if (!raw || raw[0] !== '{') {
+function parseWebsocketPayload(text) {
+  if (!text || text[0] !== '{') {
     return null;
   }
 
   let payload;
   try {
-    payload = JSON.parse(raw);
+    payload = JSON.parse(text);
   } catch (err) {
     console.error('Failed to parse eWeLink websocket message:', err.message || err);
     return null;
@@ -134,7 +37,7 @@ function parseWebsocketPayload(raw) {
 
   // Handshake packet includes config but no device state.
   if (payload && payload.config) {
-    console.log(`eWeLink websocket config received: ${raw}`);
+    console.log('eWeLink websocket config received');
     return null;
   }
 
@@ -149,21 +52,11 @@ function parseWebsocketPayload(raw) {
   return payload;
 }
 
-async function publishDeviceUpdate(action) {
-  const deviceId = sanitizeTopicLevel(action.deviceid);
-  const baseTopic = `${config.topicPrefix}/${deviceId}/state`;
-
-  if (config.publishRawState) {
-    await publishMqtt(`${baseTopic}/raw`, JSON.stringify(action.params));
-  }
-
-  const entries = Object.entries(action.params);
-  for (const [key, value] of entries) {
-    const topic = `${baseTopic}/${sanitizeTopicLevel(key)}`;
-    await publishMqtt(topic, toPayload(value));
-  }
-
-  console.log(`Published ${entries.length}${config.publishRawState ? ' + raw' : ''} topics for device ${deviceId}`);
+function publishDeviceUpdate(action) {
+  if (shuttingDown) return;
+  const publications = devicePublications(action);
+  for (const output of outputs) output.enqueue(publications);
+  if (config.verbose) console.log('Enqueued ' + publications.length + ' publications for each MQTT output');
 }
 
 async function loginWithRegionFallback(client) {
@@ -231,19 +124,20 @@ async function startBridge() {
     (event) => {
       console.error('eWeLink websocket error:', event && event.message ? event.message : event);
     },
-    async (_ws, message) => {
-      const rawMessage = getWebsocketRawMessage(message);
+    (_ws, message) => {
+      if (shuttingDown) return;
+      const messageText = getWebsocketMessageText(message);
 
-      if (config.verbose && rawMessage !== null) {
-        console.log('eWeLink websocket message:', rawMessage);
+      if (config.verbose && messageText !== null) {
+        console.log('eWeLink websocket message:', messageText);
       }
 
-      const action = parseWebsocketPayload(rawMessage);
+      const action = parseWebsocketPayload(messageText);
       if (!action) {
         return;
       }
 
-      await publishDeviceUpdate(action);
+      publishDeviceUpdate(action);
     }
   );
 
@@ -255,7 +149,7 @@ async function shutdown(signal, requestedExitCode = 0) {
     return;
   }
   shuttingDown = true;
-  exitCode = requestedExitCode;
+  const deadline = setTimeout(() => process.exit(requestedExitCode), 5000);
 
   console.log(`Received ${signal}, shutting down...`);
 
@@ -271,33 +165,9 @@ async function shutdown(signal, requestedExitCode = 0) {
     }
   }
 
-  const finish = (force) => {
-    mqttClient.end(force, () => process.exit(exitCode));
-  };
-
-  const shutdownTimeout = setTimeout(() => {
-    console.error('Timed out publishing offline status, forcing MQTT disconnect.');
-    finish(true);
-  }, 5000);
-
-  if (!mqttClient.connected) {
-    console.error('MQTT client is not connected during shutdown; forcing disconnect.');
-    clearTimeout(shutdownTimeout);
-    finish(true);
-    return;
-  }
-
-  mqttClient.publish(bridgeStatusTopic, 'offline', { qos: 1, retain: true }, (err) => {
-    clearTimeout(shutdownTimeout);
-
-    if (err) {
-      console.error('Failed to publish bridge offline status:', err.message || err);
-      finish(true);
-      return;
-    }
-
-    finish(false);
-  });
+  await Promise.all(outputs.map(output => output.stop(4500)));
+  clearTimeout(deadline);
+  process.exit(requestedExitCode);
 }
 
 process.on('SIGINT', () => shutdown('SIGINT', 0));
