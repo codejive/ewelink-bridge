@@ -9,55 +9,8 @@ function redactUrl(value) {
   return url.toString();
 }
 
-// Linked FIFO: constant-time enqueue/dequeue even at the default 100,000 limit.
-class PublicationBuffer {
-  constructor(limit) {
-    this.limit = limit;
-    this.head = null;
-    this.tail = null;
-    this.depth = 0;
-    this.inFlight = false;
-    this.drops = 0;
-  }
-
-  enqueue(publication) {
-    if (this.depth === this.limit) {
-      // The head cannot be withdrawn while MQTT owns its publication.
-      if (this.inFlight) {
-        if (this.depth === 1) { this.drops++; return false; }
-        this.head.next = this.head.next.next;
-        if (!this.head.next) this.tail = this.head;
-      } else {
-        this.head = this.head.next;
-        if (!this.head) this.tail = null;
-      }
-      this.depth--;
-      this.drops++;
-    }
-    const node = { publication, next: null };
-    if (this.tail) this.tail.next = node;
-    else this.head = node;
-    this.tail = node;
-    this.depth++;
-    return true;
-  }
-
-  begin() {
-    if (this.inFlight || !this.head) return null;
-    this.inFlight = true;
-    return this.head.publication;
-  }
-
-  complete() {
-    if (!this.inFlight) return;
-    this.head = this.head.next;
-    if (!this.head) this.tail = null;
-    this.depth--;
-    this.inFlight = false;
-  }
-
-  retry() { this.inFlight = false; }
-}
+const { PublicationBuffer } = require('./publication-buffer');
+const { mqttTopic } = require('./publications');
 
 class MqttOutput {
   constructor(config, { connect = require('mqtt').connect, logger = console,
@@ -140,7 +93,7 @@ class MqttOutput {
     if (this.stopped || !this.ready || !this.client || !this.client.connected) return;
     const publication = this.buffer.begin();
     if (!publication) return;
-    this.publish(`${this.config.topicPrefix}/${publication.topic}`, publication.payload,
+    this.publish(`${this.config.topicPrefix}/${mqttTopic(publication)}`, publication.payload,
       { qos: this.config.qos, retain: this.config.retain }, this.generation, () => {
         this.buffer.complete();
         this.schedule();
@@ -219,4 +172,4 @@ class MqttOutput {
   }
 }
 
-module.exports = { MqttOutput, PublicationBuffer, redactUrl };
+module.exports = { MqttOutput, redactUrl };

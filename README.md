@@ -1,213 +1,138 @@
-# eWeLink to MQTT Bridge
+# eWeLink Bridge
 
-`ewelink-mqtt-bridge` connects to one eWeLink cloud websocket and republishes device updates to one or more [MQTT](https://mqtt.org/) brokers. Data flows only from eWeLink to MQTT; the bridge does not subscribe to broker commands.
+`ewelink-bridge` connects to one eWeLink cloud websocket and republishes live device updates to one or more [MQTT](https://mqtt.org/) and [NATS](https://nats.io/) brokers. Outputs may use either protocol in the same process. Data flows from eWeLink to brokers; the bridge does not subscribe to commands.
 
-This is useful when your eWeLink devices can't connect directly to your MQTT broker. For example because your broker is on a public server and uses SSL, which the eWeLink devices don't support.
+Each update is converted once into individual parameter publications. Every output has its own connection, bounded in-memory FIFO, delivery worker, and reconnect lifecycle. Unavailable outputs do not delay eWeLink startup or healthy outputs.
 
-Looking for the NATS version of this bridge? Check out [ewelink-nats-bridge](https://github.com/codejive/ewelink-nats-bridge).
+## Configuration
 
-## How It Works
+Configuration uses environment variables. Copy `.env.example` to `.env` and fill in credentials and broker settings. Node does not automatically load `.env`; use `node --env-file=.env bridge.js`.
 
-1. Authenticate to eWeLink cloud using app credentials and account credentials.
-2. Open a persistent websocket to receive live device update events.
-3. Convert each update once into individual publications, then enqueue them independently for every output.
-4. Each output uses its own MQTT connection, bounded in-memory FIFO, delivery worker, and reconnect cycle. An unavailable broker does not block other outputs or eWeLink updates.
+Without `BRIDGE_OUTPUTS`, set exactly one of `MQTT_URL` or `NATS_SERVERS`. Both selectors, neither selector, or an empty selected address are invalid. Addresses have no implicit defaults.
 
-## MQTT Topics
-
-Default topic layout:
-
-- `ewelink/<deviceId>/state/<key>`
-- `ewelink/bridge/status`
-
-Examples:
-
-- `ewelink/1000abcdef/state/temperature` -> `22.5`
-- `ewelink/1000abcdef/state/humidity` -> `48`
-- `ewelink/bridge/status` -> `online` or `offline`
-
-Topic prefix is configurable via `TOPIC_PREFIX`.
-
-Each output publishes its own retained `<prefix>/bridge/status=online` on successful connection, separately from buffered device data. Its retained last will is `offline`. Shutdown stops accepting updates, attempts `offline` on connected outputs, and closes all outputs concurrently under a five-second process deadline without waiting to drain queues. Availability always uses QoS 1 and retain, independently of device publication settings.
-
-## Environment Variables
-
-The bridge is configured only through environment variables.
-
-| Variable | Required | Default | Description |
-| --- | --- | --- | --- |
-| `EWELINK_ACCOUNT` | Yes | - | eWeLink account identifier (email or phone number). |
-| `EWELINK_PASSWORD` | Yes | - | eWeLink account password used for cloud login. |
-| `EWELINK_APP_ID` | Yes | - | eWeLink developer app ID used for API authentication. |
-| `EWELINK_APP_SECRET` | Yes | - | eWeLink developer app secret used for API authentication. |
-| `EWELINK_REGION` | No | `us` | eWeLink region for your account. Valid values: `us`, `eu`, `cn`, `as`. |
-| `EWELINK_AREA_CODE` | No | `+1` | Area code used during login (required by eWeLink login API). |
-| `MQTT_URL` | No | `mqtt://127.0.0.1:1883` | MQTT broker URL. Examples: `mqtt://broker:1883`, `mqtts://broker:8883`. |
-| `MQTT_USER` | No | empty | Username for MQTT authentication. |
-| `MQTT_PASS` | No | empty | Password for MQTT authentication. |
-| `TOPIC_PREFIX` | No | `ewelink` | Prefix used for all published topics. |
-| `VERBOSE` | No | `false` | If `true`, logs every websocket message received from eWeLink, including non-update packets. |
-| `MQTT_RETAIN` | No | `true` | If `true`, publishes state messages with retain flag enabled. |
-| `MQTT_QOS` | No | `1` | MQTT QoS level for published messages. Allowed: `0`, `1`, `2`. |
-| `MQTT_BUFFER_LIMIT` | No | `100000` | Maximum individual device publications per output, including the one in flight. Positive safe integer. |
-| `MQTT_OUTPUTS` | No | unset | Comma-separated output names, e.g. `home,remote`. Enables named configuration below. |
-| `EXIT_ON_WEBSOCKET_CLOSE` | No | `true` | If `true`, process exits when eWeLink websocket closes (recommended in containers with restart policy). |
-
-Boolean variables (`VERBOSE`, `MQTT_RETAIN`, `EXIT_ON_WEBSOCKET_CLOSE`) accept: `true/false`, `1/0`, `yes/no`, `on/off`. Invalid booleans, QoS, limits, topic prefixes, URLs, region, missing eWeLink credentials, and invalid named outputs fail validation before any connection is opened.
-
-### Named outputs and precedence
-
-Without `MQTT_OUTPUTS`, existing `MQTT_URL`, `MQTT_USER`, `MQTT_PASS`, `TOPIC_PREFIX`, `MQTT_QOS`, and `MQTT_RETAIN` deployments continue to work, with the new bounded buffer. With `MQTT_OUTPUTS`, the legacy broker URL and credentials are ignored. Each named output requires its own URL; credentials are optional and do not inherit legacy credentials.
+For named outputs, set `BRIDGE_OUTPUTS` and exactly one of `MQTT_<NAME>_URL` or `NATS_<NAME>_SERVERS` per output:
 
 ```ini
-MQTT_OUTPUTS=home,remote
+BRIDGE_OUTPUTS=home,events
 MQTT_HOME_URL=mqtt://home-broker:1883
 MQTT_HOME_USER=bridge
 MQTT_HOME_PASS=secret
-MQTT_REMOTE_URL=mqtts://remote-broker:8883
-MQTT_REMOTE_USER=bridge
-MQTT_REMOTE_PASS=secret
+NATS_EVENTS_SERVERS=nats://events-one:4222,nats://events-two:4222
+NATS_EVENTS_TOKEN=secret
 
 TOPIC_PREFIX=ewelink
-MQTT_QOS=1
-MQTT_RETAIN=true
+SUBJECT_PREFIX=ewelink
 MQTT_BUFFER_LIMIT=100000
-MQTT_HOME_BUFFER_LIMIT=50000
+NATS_BUFFER_LIMIT=100000
+NATS_EVENTS_BUFFER_LIMIT=50000
 ```
 
-Names start with a letter and contain letters, digits, or underscores. Names are case-insensitive for environment variable lookup and must be unique. An explicitly empty `MQTT_OUTPUTS` is invalid. The output name is uppercased in variable names.
+Names start with a letter and contain letters, digits, or underscores. Lookup is case-insensitive; duplicate names and an empty list are invalid. Named mode ignores unnamed addresses, credentials, certificates, and connection names.
 
-| Per-output variable | Fallback |
-| --- | --- |
-| `MQTT_<NAME>_URL` | Required; no fallback |
-| `MQTT_<NAME>_USER`, `MQTT_<NAME>_PASS` | No credentials |
-| `MQTT_<NAME>_TOPIC_PREFIX` | `TOPIC_PREFIX`, then `ewelink` |
-| `MQTT_<NAME>_QOS` | `MQTT_QOS`, then `1` |
-| `MQTT_<NAME>_RETAIN` | `MQTT_RETAIN`, then `true` |
-| `MQTT_<NAME>_BUFFER_LIMIT` | `MQTT_BUFFER_LIMIT`, then `100000` |
+### Shared settings
 
-Empty optional values use their fallback. Shared defaults are validated even when outputs override them. URLs support `mqtt://`, `mqtts://`, `ws://`, and `wss://`. Topic prefixes must be nonempty and contain no MQTT wildcards. All settings remain ordinary environment variables, usable with `docker run -e`, `--env-file`, or Compose `env_file`; Node does not automatically load `.env`.
+| Variable | Default | Description |
+| --- | --- | --- |
+| `EWELINK_ACCOUNT` | required | Email or phone number; `EWELINK_EMAIL` is a fallback alias. |
+| `EWELINK_PASSWORD` | required | Account password. |
+| `EWELINK_APP_ID` | required | Developer app ID. |
+| `EWELINK_APP_SECRET` | required | Developer app secret. |
+| `EWELINK_REGION` | `us` | Region: `us`, `eu`, `cn`, or `as`; login follows region redirects. |
+| `EWELINK_AREA_CODE` | `+1` | Area code used for login. |
+| `BRIDGE_OUTPUTS` | unset | Comma-separated named outputs. |
+| `VERBOSE` | `false` | Log all eWeLink websocket packets, which may contain sensitive data. |
+| `EXIT_ON_WEBSOCKET_CLOSE` | `true` | Exit with failure on cloud closure, for container restart. |
 
-## Getting App Credentials
+Obtain your app ID and secret by registering and creating an application on the [eWeLink Developer Platform](https://dev.ewelink.io/). See the [eWeLink API library](https://www.npmjs.com/package/ewelink-api-next) for details.
 
-This bridge requires your own eWeLink app credentials:
+### MQTT settings
 
-1. **Register an eWeLink Developer Account**
-   - Visit [eWeLink Developer Platform](https://dev.ewelink.io/)
-   - Create an account or log in
+| Variable | Default | Description |
+| --- | --- | --- |
+| `MQTT_URL` | required for MQTT | Broker URL using `mqtt`, `mqtts`, `ws`, or `wss`. |
+| `MQTT_USER`, `MQTT_PASS` | empty | Authentication credentials. |
+| `TOPIC_PREFIX` | `ewelink` | Nonempty topic prefix without wildcards. |
+| `MQTT_QOS` | `1` | Device publication QoS: 0, 1, or 2. |
+| `MQTT_RETAIN` | `true` | Retain device state. |
+| `MQTT_BUFFER_LIMIT` | `100000` | Positive safe integer; maximum queued publications including the one in flight. |
 
-2. **Create an Application**
-   - Navigate to the applications/credentials section
-   - Create a new application
-   - You'll receive an `APP_ID` and `APP_SECRET`
+Named settings are `MQTT_<NAME>_URL`, `USER`, `PASS`, `TOPIC_PREFIX`, `QOS`, `RETAIN`, and `BUFFER_LIMIT` with that same prefix. URL and credentials have no fallback. Prefix, QoS, retain, and buffer limit inherit shared defaults above. TLS broker connections use `mqtts://` and runtime trust configuration.
 
-3. **Configure the Bridge**
-   - Add `EWELINK_APP_ID` and `EWELINK_APP_SECRET` to your `.env` file or pass them as environment variables
-   - Set `EWELINK_ACCOUNT` to your eWeLink email or phone number
+### NATS settings
 
-If you're unable to obtain credentials, check the [eWeLink API Next documentation](https://www.npmjs.com/package/ewelink-api-next) or the [eWeLink community forums](https://www.ewelink.cc/).
+| Variable | Default | Description |
+| --- | --- | --- |
+| `NATS_SERVERS` | required for NATS | Comma-separated nonempty server addresses. |
+| `NATS_USER`, `NATS_PASS` | empty | Username/password authentication; password requires username. |
+| `NATS_TOKEN` | empty | Token authentication. |
+| `NATS_CREDS` | empty | Full multiline JWT/NKey credentials contents. |
+| `NATS_NAME` | `ewelink-bridge` | Connection name; named outputs default to `ewelink-bridge-<name>`. |
+| `NATS_TLS` | `false` | Require TLS using runtime trust roots. |
+| `NATS_TLS_CA` | empty | PEM CA contents; enables TLS. |
+| `NATS_TLS_CERT`, `NATS_TLS_KEY` | empty | PEM client certificate/key contents; set both. |
+| `NATS_CONNECT_TIMEOUT` | `10000` | Positive connection timeout in milliseconds. |
+| `NATS_RECONNECT_TIME_WAIT` | `3000` | Nonnegative reconnect delay in milliseconds; native reconnect adds jitter. |
+| `NATS_MAX_RECONNECT_ATTEMPTS` | `-1` | Reconnect attempts per server; -1 unlimited, 0 disables retries. |
+| `NATS_BUFFER_LIMIT` | `100000` | Positive safe integer; maximum queued publications including the one in flight. |
+| `SUBJECT_PREFIX` | `ewelink` | Nonempty dot-separated prefix without whitespace or wildcards. |
 
-## Usage
+Named settings use `NATS_<NAME>_` followed by any suffix in the table, including `SUBJECT_PREFIX`. Reconnect settings, timeout, TLS enable flag, subject prefix, and buffer limit inherit shared defaults. Servers, authentication, certificate contents, and connection names are configured per output. Choose exactly one authentication method: user/password, token, or credentials.
 
-Copy `.env.example` to `.env`, fill in your credentials, and set `MQTT_URL` to a broker address reachable from the container (not `127.0.0.1`). Replace `<version>` below with the exact tag of a [published release](https://github.com/codejive/ewelink-mqtt-bridge/releases), including the `v` prefix. Normally, use the latest release:
+Booleans accept `true/false`, `1/0`, `yes/no`, and `on/off`. Empty optional settings use their fallback. Defaults for active protocols are validated even when overridden; settings for unused protocols are ignored. All configuration is validated before connections open.
+
+## Publications and status
+
+| Protocol | Device state | Bridge status |
+| --- | --- | --- |
+| MQTT | `ewelink/<deviceId>/state/<key>` | `ewelink/bridge/status` |
+| NATS | `ewelink.<deviceId>.state.<key>` | `ewelink.bridge.status` |
+
+For example, temperature 22.5 and humidity 48 produce two publications with payloads `22.5` and `48`. Scalars are text, objects/arrays are JSON, and null is empty text. MQTT wildcard characters, slashes, and NUL in device IDs/keys become underscores. NATS dots, whitespace, wildcards, and NUL become underscores.
+
+MQTT status is retained, uses QoS 1 independently of device settings, and has an `offline` last will. Each NATS output publishes `online` and flushes on connection/reconnection before replaying device data. Asynchronous server permission errors are monitored separately because a successful flush does not confirm publish authorization. Allow publishing to status and device subjects.
+
+Core NATS has no retention, MQTT QoS, last will, or subscriber acknowledgements. Late subscribers receive no previous state; abrupt termination cannot publish `offline`. The bridge does not configure JetStream.
+
+## Running
+
+Requires Node.js 22 or newer:
 
 ```sh
-docker run -d --name ewelink-mqtt-bridge --restart unless-stopped \
-  --env-file .env codejive/ewelink-mqtt-bridge:<version>
+npm ci
+cp .env.example .env
+# Fill in eWeLink credentials and select your broker.
+node --env-file=.env bridge.js
 ```
 
-## Developing
+On PowerShell use `Copy-Item .env.example .env`. Alternatively export environment variables and run `npm start`.
 
-### Quick Start (Node.js)
-
-1. Install dependencies:
-
-```bash
-npm install
-```
-
-1. Run with required variables:
-
-```bash
-EWELINK_ACCOUNT="you@example.com" \
-EWELINK_PASSWORD="your-password" \
-EWELINK_REGION="eu" \
-EWELINK_AREA_CODE="+1" \
-EWELINK_APP_ID="your-app-id" \
-EWELINK_APP_SECRET="your-app-secret" \
-MQTT_URL="mqtt://127.0.0.1:1883" \
-node bridge.js
-```
-
-### Docker
-
-Build image:
-
-```bash
-docker build -t ewelink-mqtt-bridge:local .
-```
-
-Run container:
-
-```bash
-docker run -d \
-  --name ewelink-mqtt-bridge \
-  --restart unless-stopped \
-  -e EWELINK_ACCOUNT="you@example.com" \
-  -e EWELINK_PASSWORD="your-password" \
-  -e EWELINK_REGION="eu" \
-  -e EWELINK_AREA_CODE="+1" \
-  -e EWELINK_APP_ID="your-app-id" \
-  -e EWELINK_APP_SECRET="your-app-secret" \
-  -e MQTT_URL="mqtt://broker:1883" \
-  -e MQTT_USER="mqtt-user" \
-  -e MQTT_PASS="mqtt-pass" \
-  ewelink-mqtt-bridge:local
-```
-
-Use host networking only if your platform/setup requires it.
-
-For two outputs, put eWeLink credentials in `.env` and pass the output configuration directly, or put all variables in the same env file:
+Build and run with Docker:
 
 ```sh
-docker run -d --name ewelink-mqtt-bridge --restart unless-stopped \
-  --env-file .env \
-  -e MQTT_OUTPUTS=home,remote \
-  -e MQTT_HOME_URL=mqtt://home-broker:1883 \
-  -e MQTT_HOME_USER=bridge -e MQTT_HOME_PASS=secret \
-  -e MQTT_REMOTE_URL=mqtts://remote-broker:8883 \
-  -e MQTT_REMOTE_USER=bridge -e MQTT_REMOTE_PASS=secret \
-  -e MQTT_BUFFER_LIMIT=100000 -e MQTT_HOME_BUFFER_LIMIT=50000 \
-  ewelink-mqtt-bridge:local
+docker build -t ewelink-bridge:local .
+docker run -d --name ewelink-bridge --restart unless-stopped \
+  --env-file .env ewelink-bridge:local
 ```
 
-Docker `-e` settings override values from `--env-file`. Use addresses reachable from the container for every output.
+For a published image use `codejive/ewelink-bridge:<version>` with the release tag including its `v` prefix. Set the image tag in `docker-compose.yml`, then run `docker compose up -d`. Addresses must be reachable from the container; its `127.0.0.1` refers to the container itself. Use host networking only when your platform requires it.
 
-### Docker Compose
+Docker `--env-file` does not support multiline values. Inject multiline NATS credentials/certificates through environment variables or Compose's supported quoted multiline `.env` values.
 
-1. Copy `.env.example` to `.env` and fill in your values.
-2. Update image in `docker-compose.yml` to your published image (or build locally and point to that tag).
-3. Start:
+## Operational behavior
 
-```bash
-docker compose up -d
-```
+- Every FIFO counts individual publications, including one in flight. Repeated parameter values stay separate and ordered.
+- Overflow drops the oldest pending publication. The in-flight head stays pinned; at capacity one, incoming data is dropped while the head is in flight.
+- MQTT callbacks and NATS flushes advance queues. NATS flushes confirm server round trips, not subscriber receipt. Stalled publications/status flushes time out after 15 seconds. Disconnects or failed operations keep unconfirmed data for retry; retries may duplicate messages.
+- MQTT connection attempts time out after 15 seconds and retry every three seconds. NATS uses its configured connection/reconnect policy. Initial NATS failures also retry independently; finite budgets are applied per server. Exhaustion marks that output failed until process restart. Other outputs and eWeLink ingestion continue, and its queue remains bounded.
+- Buffers are in RAM and disappear on exit. Count limits do not bound bytes; size limits according to payload sizes and available memory. MQTT retained replay sends historical values before retaining the latest delivered value.
+- SIGINT/SIGTERM stops ingestion, attempts `offline`, and closes all outputs concurrently within five seconds. NATS drains transport data; application queues are not drained. A connection finishing after shutdown is closed.
+- Logs identify the transport/output and report queue depth, in-flight count, drops, failures, and reconnects every minute. Repeated connection/outage/overflow logs are rate-limited. Transport errors use generic descriptions to avoid exposing credentials.
+- eWeLink authentication errors stop the process. Disabling `EXIT_ON_WEBSOCKET_CLOSE` leaves it running after cloud closure without automatically reconnecting the cloud websocket.
 
-## Operational Notes
+## Validation
 
-- If websocket connectivity drops, the bridge can exit and rely on container restart policy.
-- MQTT retained messages are convenient for Home Assistant and similar consumers, but can be disabled with `MQTT_RETAIN=false`.
-- The bridge manages `ewelink/bridge/status` itself: `online` on MQTT connect, `offline` on shutdown, and `offline` via MQTT last-will if the process stops unexpectedly.
-- If your broker requires TLS, use an `mqtts://` URL and ensure trust/cert settings are provided by your runtime environment.
-- Each broker has a FIFO measured in individual publications, not updates or topics. Repeated values for the same topic remain separate and ordered. Pending and in-flight publications together cannot exceed that output's limit.
-- On overflow, the oldest pending publication is dropped and counted. The in-flight publication cannot be withdrawn: it stays at the head while the oldest publication behind it is discarded. At capacity one with a publication in flight, the incoming publication is dropped instead because no existing pending publication can be removed.
-- Successful publish callbacks remove publications. Disconnects, publish errors, and callbacks stalled for 15 seconds replace that output's transport and retry buffered data in order. Connection attempts also time out after 15 seconds; retries are independent and spaced three seconds apart. Retries can produce duplicates, including when a broker received a message before confirmation was lost. QoS 0 callbacks confirm local sending only, not broker receipt; QoS 1/2 use MQTT acknowledgments and do not make bridge retries exactly once.
-- Buffers exist only in RAM and are lost on process exit, restart, or shutdown. They provide no persistence. Memory grows with payload and topic sizes and queue depth across all outputs; 100,000 publications is a count limit, not a byte limit. As an illustration, 100-byte payloads alone account for about 10 MB per full output, before topic strings, FIFO nodes, JavaScript overhead, and MQTT transport storage. Size limits and available container memory accordingly.
-- With `MQTT_RETAIN=true`, replay sends historical buffered values to active subscribers. Retained storage ultimately holds the last delivered value for each topic. Disabling retain does not disable FIFO buffering.
-- Logs include the output name and report queue depth, in-flight count, cumulative overflow drops, publication failures, and reconnect attempts every minute and on relevant events. Repeated outage, reconnect, connection, and overflow logs are limited to one per category per output every 30 seconds. Broker URL credentials and query strings are redacted; broker errors use generic descriptions to avoid exposing credentials.
-
-Run `npm test` for configuration and FIFO unit tests, transport callback tests, and local two-broker integration tests. The integration tests cover matching publication order, disconnects, stalled acknowledgments, reconnect replay, overflow, in-flight accounting, unavailable-broker startup/shutdown, and legacy single-broker configuration. They require no eWeLink credentials or external broker.
+`npm test` runs configuration, buffering, adapter, and MQTT integration tests without eWeLink access. Real NATS integration tests run when `NATS_SERVER_BINARY` points to a local `nats-server` executable; they launch isolated test servers and run in CI.
 
 ## License
 
-This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE).
+Apache License 2.0; see [LICENSE](LICENSE).

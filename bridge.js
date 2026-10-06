@@ -3,6 +3,7 @@
 const Ewelink = require('ewelink-api-next').default;
 const { loadConfig } = require('./config');
 const { MqttOutput } = require('./mqtt-output');
+const { NatsOutput } = require('./nats-output');
 const { devicePublications } = require('./publications');
 
 let config;
@@ -11,8 +12,7 @@ catch (err) { console.error(err.message); process.exit(1); }
 
 let websocket;
 let shuttingDown = false;
-const outputs = config.outputs.map(output => new MqttOutput(output));
-outputs.forEach(output => output.start());
+const outputs = config.outputs.map(output => output.type === 'mqtt' ? new MqttOutput(output) : new NatsOutput(output));
 
 function getWebsocketMessageText(message) {
   if (!message || typeof message.data === 'undefined' || message.data === null) {
@@ -56,7 +56,7 @@ function publishDeviceUpdate(action) {
   if (shuttingDown) return;
   const publications = devicePublications(action);
   for (const output of outputs) output.enqueue(publications);
-  if (config.verbose) console.log('Enqueued ' + publications.length + ' publications for each MQTT output');
+  if (config.verbose) console.log('Enqueued ' + publications.length + ' publications for each bridge output');
 }
 
 async function loginWithRegionFallback(client) {
@@ -94,6 +94,7 @@ async function startBridge() {
   });
 
   const { response: loginResponse, region: resolvedRegion } = await loginWithRegionFallback(webApi);
+  if (shuttingDown) return;
   if (!loginResponse || loginResponse.error) {
     const message = loginResponse && loginResponse.msg ? loginResponse.msg : JSON.stringify(loginResponse || {});
     throw new Error(`Failed to authenticate with eWeLink cloud: ${message}`);
@@ -141,6 +142,11 @@ async function startBridge() {
     }
   );
 
+  if (shuttingDown) {
+    if (typeof websocket.close === 'function') websocket.close();
+    else if (typeof websocket.terminate === 'function') websocket.terminate();
+    return;
+  }
   console.log('Bridge is running. Waiting for device updates...');
 }
 
@@ -183,6 +189,7 @@ process.on('uncaughtException', (err) => {
   shutdown('UNCAUGHT_EXCEPTION', 1);
 });
 
+outputs.forEach(output => output.start());
 startBridge().catch((err) => {
   console.error('Failed to start bridge:', err.message || err);
   shutdown('STARTUP_FAILURE', 1);

@@ -1,9 +1,9 @@
 services:
-  ewelink-mqtt-bridge:
-    image: codejive/ewelink-mqtt-bridge:latest
-    container_name: ewelink-mqtt-bridge
+  ewelink-bridge:
+    image: codejive/ewelink-bridge:latest
+    container_name: ewelink-bridge
     restart: unless-stopped
     env_file:
-      # Supports both single-broker and MQTT_OUTPUTS named configuration.
+      # Supports both single-broker and BRIDGE_OUTPUTS named configuration.
       - .env
     network_mode: host

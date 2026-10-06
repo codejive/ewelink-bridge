@@ -22,7 +22,7 @@ test('connection and online-status stalls both reconnect under a deadline', asyn
     try {
       output.start();
       if (phase === 'online') clients[0].emit('connect');
-      output.enqueue([{ topic: 'a', payload: '1' }]);
+      output.enqueue([{ deviceId: 'device', key: 'a', payload: '1' }]);
       await new Promise(resolve => setTimeout(resolve, 60));
       assert.ok(output.reconnects > 0);
       assert.ok(clients.length > 1);
@@ -53,7 +53,7 @@ test('late callback after disconnect cannot acknowledge a retried head', async (
   });
   try {
     output.start(); clients[0].emit('connect');
-    output.enqueue([{ topic: 'device/state/a', payload: 'first' }, { topic: 'device/state/a', payload: 'second' }]);
+    output.enqueue([{ deviceId: 'device', key: 'a', payload: 'first' }, { deviceId: 'device', key: 'a', payload: 'second' }]);
     await tick();
     const oldCallback = clients[0].calls[0].callback;
     clients[0].emit('close');
@@ -90,12 +90,12 @@ test('synchronous publish exceptions retry without removing data and overflow lo
   });
   try {
     output.start(); client.emit('connect');
-    output.enqueue([{ topic: 'a', payload: '1' }]);
+    output.enqueue([{ deviceId: 'device', key: 'a', payload: '1' }]);
     await tick();
     assert.equal(output.buffer.depth, 1);
     assert.equal(output.buffer.inFlight, false);
     assert.equal(output.failures, 1);
-    for (let i = 0; i < 10; i++) output.enqueue([{ topic: 'a', payload: String(i) }]);
+    for (let i = 0; i < 10; i++) output.enqueue([{ deviceId: 'device', key: 'a', payload: String(i) }]);
     assert.equal(output.buffer.drops, 10);
     assert.equal(logs.filter(message => message.includes('overflow;')).length, 1);
     assert.ok(logs.every(message => !message.includes('secret')));

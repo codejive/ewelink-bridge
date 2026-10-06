@@ -1,8 +1,9 @@
 'use strict';
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { PublicationBuffer, redactUrl } = require('../mqtt-output');
-const { devicePublications } = require('../publications');
+const { PublicationBuffer } = require('../publication-buffer');
+const { redactUrl } = require('../mqtt-output');
+const { devicePublications, mqttTopic, natsSubject } = require('../publications');
 
 test('FIFO preserves repeated topics and drops oldest pending publication', () => {
   const buffer = new PublicationBuffer(3);
@@ -45,9 +46,12 @@ test('capacity one rejects incoming publication while head is in flight', () => 
 
 test('conversion creates individual publications in parameter order', () => {
   assert.deepEqual(devicePublications({ deviceid: 'device/+', params: { temperature: 22, values: { a: 1 }, empty: null } }), [
-    { topic: 'device__/state/temperature', payload: '22' },
-    { topic: 'device__/state/values', payload: '{"a":1}' },
-    { topic: 'device__/state/empty', payload: '' }
+    { deviceId: 'device/+', key: 'temperature', payload: '22' },
+    { deviceId: 'device/+', key: 'values', payload: '{"a":1}' },
+    { deviceId: 'device/+', key: 'empty', payload: '' }
   ]);
+  assert.equal(mqttTopic({ deviceId: 'device/+', key: 'a/#' }), 'device__/state/a__');
+  assert.equal(natsSubject({ deviceId: 'a.b', key: 'a.* >' }), 'a_b.state.a____');
+  assert.deepEqual(devicePublications({ deviceid: '123', params: { switch: 'on', raw: 1 } }).map(p => p.key), ['switch', 'raw']);
   assert.equal(redactUrl('mqtts://user:secret@broker:8883?password=secret'), 'mqtts://broker:8883');
 });

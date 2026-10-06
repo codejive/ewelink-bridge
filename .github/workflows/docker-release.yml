@@ -6,7 +6,7 @@ on:
       - 'v*'
 
 env:
-  IMAGE_NAME: ewelink-mqtt-bridge
+  IMAGE_NAME: ewelink-bridge
 
 jobs:
   build-and-push:

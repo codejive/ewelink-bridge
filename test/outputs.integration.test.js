@@ -57,7 +57,7 @@ function output(name, url, bufferLimit = 100) {
     logger, publishTimeout: 250, reconnectDelay: 50
   });
 }
-const publications = (...values) => values.map(value => ({ topic: 'device/state/value', payload: String(value) }));
+const publications = (...values) => values.map(value => ({ deviceId: 'device', key: 'value', payload: String(value) }));
 
 test('two real brokers: FIFO fan-out, disconnect isolation, reconnect drain, and overflow', async t => {
   const home = await broker();
@@ -116,31 +116,31 @@ test('stalled PUBACK does not block healthy output; in-flight is pinned and retr
   assert.deepEqual(remote.received, ['1', '4', '5']);
 });
 
-test('unavailable broker does not delay startup or fixed-deadline shutdown; legacy config connects', async t => {
+test('unavailable broker does not delay startup or fixed-deadline shutdown; single config connects', async t => {
   const home = await broker();
   const unavailable = await broker();
   await unavailable.disconnect();
   const config = loadConfig({ EWELINK_ACCOUNT: 'user', EWELINK_PASSWORD: 'pass', EWELINK_APP_ID: 'id', EWELINK_APP_SECRET: 'secret', MQTT_URL: home.url });
-  const legacy = new MqttOutput(config.outputs[0], { logger, publishTimeout: 250, reconnectDelay: 50 });
+  const single = new MqttOutput(config.outputs[0], { logger, publishTimeout: 250, reconnectDelay: 50 });
   const missing = output('unavailable', unavailable.url);
   t.after(async () => {
-    await Promise.all([legacy.stop(100), missing.stop(100)]);
+    await Promise.all([single.stop(100), missing.stop(100)]);
     await Promise.all([home.close(), unavailable.close()]);
   });
-  missing.start(); legacy.start();
+  missing.start(); single.start();
   missing.enqueue(publications(1, 2));
-  legacy.enqueue(publications(1, 2));
-  await until(() => legacy.buffer.depth === 0);
+  single.enqueue(publications(1, 2));
+  await until(() => single.buffer.depth === 0);
   assert.deepEqual(home.received, ['1', '2']);
   assert.equal(missing.buffer.depth, 2);
   // Withhold offline confirmation as well: stop must still finish.
-  const original = legacy.client.publish.bind(legacy.client);
-  legacy.client.publish = (topic, payload, options, callback) => {
+  const original = single.client.publish.bind(single.client);
+  single.client.publish = (topic, payload, options, callback) => {
     if (payload === 'offline') return;
     return original(topic, payload, options, callback);
   };
   const start = Date.now();
-  await Promise.all([legacy.stop(100), missing.stop(100)]);
+  await Promise.all([single.stop(100), missing.stop(100)]);
   assert.ok(Date.now() - start < 1000);
   assert.equal(missing.stopped, true);
 });

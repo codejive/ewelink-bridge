@@ -1,7 +1,7 @@
 {
-  "name": "ewelink-mqtt-bridge",
+  "name": "ewelink-bridge",
   "version": "1.0.0",
-  "description": "Bridge eWeLink cloud updates into a local MQTT broker",
+  "description": "Bridge eWeLink cloud updates into MQTT and NATS brokers",
   "main": "bridge.js",
   "type": "commonjs",
   "scripts": {
@@ -9,9 +9,10 @@
     "test": "node --test"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "dependencies": {
+    "@nats-io/transport-node": "^3.4.0",
     "ewelink-api-next": "^1.0.4",
     "mqtt": "^5.14.1"
   },

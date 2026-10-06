@@ -8,7 +8,7 @@ on:
   pull_request:
 
 env:
-  IMAGE_NAME: ewelink-mqtt-bridge
+  IMAGE_NAME: ewelink-bridge
 
 jobs:
   build-check:
@@ -29,8 +29,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Validate Node.js entrypoint syntax
-        run: node --check bridge.js
+      - name: Validate Node.js syntax
+        run: |
+          for file in *.js test/*.js; do node --check "$file"; done
+
+      - name: Install NATS server for integration tests
+        env:
+          NATS_VERSION: '2.15.0'
+        run: |
+          curl --fail --location --retry 3 "https://github.com/nats-io/nats-server/releases/download/v${NATS_VERSION}/nats-server-v${NATS_VERSION}-linux-amd64.tar.gz" -o "$RUNNER_TEMP/nats-server.tar.gz"
+          tar -xzf "$RUNNER_TEMP/nats-server.tar.gz" -C "$RUNNER_TEMP"
+          echo "NATS_SERVER_BINARY=$RUNNER_TEMP/nats-server-v${NATS_VERSION}-linux-amd64/nats-server" >> "$GITHUB_ENV"
 
       - name: Test configuration, buffering, and broker isolation
         run: npm test
